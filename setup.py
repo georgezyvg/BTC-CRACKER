@@ -45,7 +45,7 @@ def save_address_to_file(address, balance, filename="bitcoin_addresses.txt"):
 blockcypher_token = "YOUR_BLOCKCYPHER_API_TOKEN"
 
 # The number of private keys you want to generate
-num_keys_to_generate = 1000000000
+num_keys_to_generate = 115792089237316195423570985008687907852837564279074904382605163141518161494337
 
 def process_key():
     private_key = generate_private_key()

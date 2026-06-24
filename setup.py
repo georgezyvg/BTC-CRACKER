@@ -41,7 +41,7 @@ def check_balance(address, token):
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
-            return response.json().get('final_balance', 0)
+            return address, response.json().get('final_balance', 0)
         elif response.status_code == 429:
             # Handle API rate limiting
             time.sleep(2)
@@ -49,52 +49,70 @@ def check_balance(address, token):
         else:
             with console_lock:
                 logging.error(f"API Error {response.status_code} for address {address}")
-            return 0
+            return address, 0
     except Exception as e:
         with console_lock:
             logging.error(f"Network exception for address {address}: {e}")
-        return 0
+        return address, 0
 
-def save_address_to_file(address, balance, filename=OUTPUT_FILE):
+def save_address_to_file(private_key, address, balance, filename=OUTPUT_FILE):
     """Saves funded addresses to a .txt file safely using a lock."""
     with file_lock:
-        with open(filename, "a") as file:
-            file.write(f"Address: {address}, Balance: {balance} satoshis\n")
+        with open(filename, 'a') as f:
+            f.write(f"Private Key: {private_key} | Address: {address} | Balance: {balance}\n")
 
-def process_single_key():
-    """Generates a key, checks its balance, and returns results if funds exist."""
-    private_key, address = generate_key_pair()
-    balance = check_balance(address, BLOCKCYPHER_TOKEN)
-    
-    if balance > 0:
-        save_address_to_file(address, balance)
-        with console_lock:
-            tqdm.write(f"{Fore.GREEN}[+] FUNDED ADDRESS FOUND! {Style.RESET_ALL}Address: {address} | Balance: {balance} satoshis")
-            logging.info(f"Funded address found: {address} with {balance} satoshis")
-    return balance
+def process_batch():
+    """Generates and checks a single batch of addresses."""
+    key_pairs = [generate_key_pair() for _ in range(BATCH_SIZE)]
+    results = []
 
-def run_batch_process():
-    """Manages the batch execution using ThreadPoolExecutor and tqdm."""
-    print(f"{Fore.CYAN}Starting batch processing of {BATCH_SIZE} keys...{Style.RESET_ALL}")
-    
-    funded_count = 0
+    with console_lock:
+        print(f"{Fore.CYAN}[*] Checking batch of {BATCH_SIZE} addresses...")
+
     with ThreadPoolExecutor(max_threads=MAX_THREADS) as executor:
-        # Submit all tasks for the batch size
-        futures = [executor.submit(process_single_key) for _ in range(BATCH_SIZE)]
-        
-        # Display a progress bar for the batch execution
-        with tqdm(total=BATCH_SIZE, desc="Processing keys") as pbar:
-            for future in as_completed(futures):
-                try:
-                    balance = future.result()
-                    if balance > 0:
-                        funded_count += 1
-                except Exception as e:
-                    with console_lock:
-                        logging.error(f"Thread execution error: {e}")
-                pbar.update(1)
+        # Submit tasks and track which future corresponds to which private key
+        future_to_key = {
+            executor.submit(check_balance, address, BLOCKCYPHER_TOKEN): (private_key, address)
+            for private_key, address in key_pairs
+        }
+
+        # Display progress using tqdm
+        for future in tqdm(as_completed(future_to_key), total=BATCH_SIZE, desc="Processing", leave=False):
+            private_key, address = future_to_key[future]
+            try:
+                addr, balance = future.result()
+                results.append((private_key, addr, balance))
                 
-    print(f"{Fore.CYAN}Batch processing complete. Total funded addresses found: {funded_count}{Style.RESET_ALL}")
+                # If a funded address is found, log it and save it
+                if balance > 0:
+                    with console_lock:
+                        print(f"{Fore.GREEN}[+] FUND FOUND! Address: {address} | Balance: {balance}")
+                    logging.info(f"FUND FOUND! Address: {address} | Balance: {balance}")
+                    save_address_to_file(private_key, address, balance)
+            except Exception as exc:
+                with console_lock:
+                    logging.error(f"{address} generated an exception: {exc}")
+
+    with console_lock:
+        print(f"{Fore.YELLOW}[*] Batch complete. Continuing...")
+
+def main():
+    print(f"{Fore.YELLOW}=== Bitcoin Address Generator & Checker Initialized ===")
+    print(f"{Fore.YELLOW}Press Ctrl+C to stop the script at any time.\n")
+    
+    if BLOCKCYPHER_TOKEN == "YOUR_BLOCKCYPHER_API_TOKEN":
+        print(f"{Fore.RED}[!] WARNING: Please set your actual BlockCypher token in the script.")
+    
+    while True:
+        try:
+            process_batch()
+            time.sleep(1)  # Brief pause between batches to prevent overwhelming the API
+        except KeyboardInterrupt:
+            print(f"{Fore.RED}\n[!] Script stopped by user.")
+            break
+        except Exception as e:
+            logging.error(f"An error occurred in the main loop: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
-    run_batch_process()
+    main()

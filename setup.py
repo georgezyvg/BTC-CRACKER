@@ -1,118 +1,78 @@
-import logging
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
+import requests
 from bitcoin import *
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from colorama import Fore, Style, init
 from tqdm import tqdm
-import threading
-import requests
+import logging
+import time
 
 # Initialize colorama
 init(autoreset=True)
 
 # Logging settings
-logging.basicConfig(
-    level=logging.INFO,
-    filename='bitcoin_check.log',
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, filename='bitcoin_check.log', filemode='a',
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Initialize the API token and configuration
-BLOCKCYPHER_TOKEN = "YOUR_BLOCKCYPHER_API_TOKEN"
-OUTPUT_FILE = "bitcoin_addresses.txt"
-BATCH_SIZE = 100  # Number of keys to process in a single batch
-MAX_THREADS = 10  # Optimal number of concurrent threads
+# Randomly generate a Bitcoin private key
+def generate_private_key():
+    return random_key()
 
-# Create a lock to ensure thread-safe file writing and logging
-file_lock = threading.Lock()
-console_lock = threading.Lock()
+# Convert private key to bitcoin address
+def private_key_to_address(private_key):
+    public_key = privtopub(private_key)
+    address = pubtoaddr(public_key)
+    return address
 
-def generate_key_pair():
-    """Generates a random private key and its corresponding Bitcoin address."""
-    private_key = random_key()
-    address = pubtoaddr(privtopub(private_key))
-    return private_key, address
-
+# Address inventory check using BlockCypher API
 def check_balance(address, token):
-    """Checks the balance of a Bitcoin address using the BlockCypher API."""
     url = f"https://api.blockcypher.com/v1/btc/main/addrs/{address}/balance?token={token}"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            return address, response.json().get('final_balance', 0)
-        elif response.status_code == 429:
-            # Handle API rate limiting
-            time.sleep(2)
-            return check_balance(address, token)
-        else:
-            with console_lock:
-                logging.error(f"API Error {response.status_code} for address {address}")
-            return address, 0
-    except Exception as e:
-        with console_lock:
-            logging.error(f"Network exception for address {address}: {e}")
-        return address, 0
+    response = requests.get(url)
+    if response.status_code == 200:
+        balance_data = response.json()
+        return balance_data['final_balance']
+    else:
+        logging.error(f"Error checking balance for address {address}: {response.status_code}")
+        return 0
 
-def save_address_to_file(private_key, address, balance, filename=OUTPUT_FILE):
-    """Saves funded addresses to a .txt file safely using a lock."""
-    with file_lock:
-        with open(filename, 'a') as f:
-            f.write(f"Private Key: {private_key} | Address: {address} | Balance: {balance}\n")
+# Save addresses that have inventory in a .txt file
+def save_address_to_file(address, balance, filename="bitcoin_addresses.txt"):
+    with open(filename, "a") as file:
+        file.write(f"Address: {address}, Balance: {balance} satoshis\n")
 
-def process_batch():
-    """Generates and checks a single batch of addresses."""
-    key_pairs = [generate_key_pair() for _ in range(BATCH_SIZE)]
-    results = []
+# Enter your BlockCypher token here
+blockcypher_token = "YOUR_BLOCKCYPHER_API_TOKEN"
 
-    with console_lock:
-        print(f"{Fore.CYAN}[*] Checking batch of {BATCH_SIZE} addresses...")
+# The number of private keys you want to generate
+num_keys_to_generate = 1000000000
 
-    with ThreadPoolExecutor(max_threads=MAX_THREADS) as executor:
-        # Submit tasks and track which future corresponds to which private key
-        future_to_key = {
-            executor.submit(check_balance, address, BLOCKCYPHER_TOKEN): (private_key, address)
-            for private_key, address in key_pairs
-        }
+def process_key():
+    private_key = generate_private_key()
+    address = private_key_to_address(private_key)
+    balance = check_balance(address, blockcypher_token)
 
-        # Display progress using tqdm
-        for future in tqdm(as_completed(future_to_key), total=BATCH_SIZE, desc="Processing", leave=False):
-            private_key, address = future_to_key[future]
-            try:
-                addr, balance = future.result()
-                results.append((private_key, addr, balance))
-                
-                # If a funded address is found, log it and save it
-                if balance > 0:
-                    with console_lock:
-                        print(f"{Fore.GREEN}[+] FUND FOUND! Address: {address} | Balance: {balance}")
-                    logging.info(f"FUND FOUND! Address: {address} | Balance: {balance}")
-                    save_address_to_file(private_key, address, balance)
-            except Exception as exc:
-                with console_lock:
-                    logging.error(f"{address} generated an exception: {exc}")
+    # Output the private key, address, and balance with color
+    balance_btc = balance / 1e8  # Convert Satoshi to Bitcoin
+    print(f"{Fore.BLUE}{private_key} -> {Fore.GREEN}{address} {Fore.YELLOW}(Balance: {balance_btc} BTC)")
+    logging.info(f"Generated address: {address} with private key: {private_key} and balance: {balance_btc} BTC")
 
-    with console_lock:
-        print(f"{Fore.YELLOW}[*] Batch complete. Continuing...")
+    if balance > 0:
+        save_address_to_file(address, balance, filename="balance.txt")
+        print(f"{Fore.RED}Address with balance found: {address} - Balance: {balance_btc} BTC")
+        logging.info(f"Address with balance found: {address} - Balance: {balance_btc} BTC")
+    else:
+        save_address_to_file(address, balance)
 
-def main():
-    print(f"{Fore.YELLOW}=== Bitcoin Address Generator & Checker Initialized ===")
-    print(f"{Fore.YELLOW}Press Ctrl+C to stop the script at any time.\n")
-    
-    if BLOCKCYPHER_TOKEN == "YOUR_BLOCKCYPHER_API_TOKEN":
-        print(f"{Fore.RED}[!] WARNING: Please set your actual BlockCypher token in the script.")
-    
-    while True:
-        try:
-            process_batch()
-            time.sleep(1)  # Brief pause between batches to prevent overwhelming the API
-        except KeyboardInterrupt:
-            print(f"{Fore.RED}\n[!] Script stopped by user.")
-            break
-        except Exception as e:
-            logging.error(f"An error occurred in the main loop: {e}")
-            time.sleep(5)
+# Using ThreadPoolExecutor for parallelization
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [executor.submit(process_key) for _ in range(num_keys_to_generate)]
+    with tqdm(total=num_keys_to_generate, desc="Processing keys", unit=" key") as pbar:
+        while True:
+            finished = sum(future.done() for future in futures)
+            pbar.update(finished - pbar.n)
+            time.sleep(5)  # The status is updated every 5 seconds
+            if all(future.done() for future in futures):
+                break
 
-if __name__ == "__main__":
-    main()
+print("Finished checking addresses.")
